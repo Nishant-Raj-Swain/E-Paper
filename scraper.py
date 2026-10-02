@@ -5,24 +5,20 @@ import requests
 from bs4 import BeautifulSoup
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Accurate paths for all language categories
+# Explicit Landing Page Endpoints
 CATEGORY_URLS = {
-    "hindi": [
-        "https://dailyepaper.in/category/hindi-epaper/",
-        "https://dailyepaper.in/hindi-newspapers/",
-    ],
     "english": [
-        "https://dailyepaper.in/category/english-epaper/",
         "https://dailyepaper.in/english-newspapers/",
+        "https://dailyepaper.in/category/english-epaper/",
     ],
-    "bengali": [
-        "https://dailyepaper.in/category/bengali-epaper/",
-        "https://dailyepaper.in/bengali-newspapers/",
+    "hindi": [
+        "https://dailyepaper.in/hindi-newspapers/",
+        "https://dailyepaper.in/category/hindi-epaper/",
     ],
     "odia": [
         "https://dailyepaper.in/odia-newspapers/",
@@ -32,12 +28,17 @@ CATEGORY_URLS = {
         "https://dailyepaper.in/marathi-newspapers/",
         "https://dailyepaper.in/category/marathi-epaper/",
     ],
+    "bengali": [
+        "https://dailyepaper.in/bengali-newspapers/",
+        "https://dailyepaper.in/category/bengali-epaper/",
+    ],
 }
 
 
 def clean_paper_title(raw_title: str) -> str:
-    """Removes boilerplate suffix text, dynamic year tags, and download labels."""
+    """Removes boilerplate button labels, years, and download suffixes."""
     patterns = [
+        r"(?i)\s*Download\s*PDF",
         r"(?i)\s*ePaper\s*Download\s*Daily\s*After\s*07:00\s*AM",
         r"(?i)\s*Today\s*Download\s*After\s*07:00\s*AM",
         r"(?i)\s*Free\s*Download\s*Daily\s*After\s*07:00\s*AM",
@@ -46,7 +47,8 @@ def clean_paper_title(raw_title: str) -> str:
         r"(?i)\s*ePaper\s*Free\s*Download.*$",
         r"(?i)\s*Free\s*Download.*$",
         r"(?i)\s*ePaper.*$",
-        r"\b202[0-9]\b",  # Cleans year tags like 2025, 2026
+        r"(?i)\s*PDF\s*Download.*$",
+        r"\b202[0-9]\b",
     ]
     cleaned = raw_title
     for pattern in patterns:
@@ -55,79 +57,87 @@ def clean_paper_title(raw_title: str) -> str:
 
 
 def get_newspapers_by_language(language: str) -> dict:
-    """Extracts paper names and post URLs for the chosen language."""
-    urls = CATEGORY_URLS.get(language.lower(), CATEGORY_URLS["hindi"])
+    """Scrapes all newspapers from grid containers and post links."""
+    urls = CATEGORY_URLS.get(language.lower(), CATEGORY_URLS["english"])
     papers = {}
 
-    for url in urls:
-        try:
-            response = httpx.get(
-                url, headers=HEADERS, follow_redirects=True, timeout=20.0
-            )
-            if response.status_code != 200:
-                continue
+    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=25.0) as client:
+        for url in urls:
+            try:
+                response = client.get(url)
+                if response.status_code != 200:
+                    continue
 
-            soup = BeautifulSoup(response.text, "html.parser")
+                soup = BeautifulSoup(response.text, "html.parser")
 
-            headings = soup.select(
-                "article h2, article h3, .entry-title, h2.post-title, h3.post-title, .post-archive h2"
-            )
+                # Strategy 1: Grid Table/Card Rows (Handles English, Odia & Marathi layouts)
+                # Finds containers with paper name + download link
+                containers = soup.select(
+                    ".elementor-widget-container, .post-card, article, tr, .wp-block-columns"
+                )
 
-            if not headings:
-                headings = soup.select("article a, .post-item a")
+                for container in containers:
+                    links = container.find_all("a", href=True)
+                    if not links:
+                        continue
 
-            for heading in headings:
-                raw_title = heading.get_text(strip=True)
-                a_tag = heading if heading.name == "a" else heading.find("a")
+                    # Extract paper name from text or links inside container
+                    raw_text = container.get_text(" ", strip=True)
+                    clean_name = clean_paper_title(raw_text)
 
-                if a_tag and "href" in a_tag.attrs:
-                    post_url = a_tag["href"]
-                    clean_name = clean_paper_title(raw_title)
+                    for link in links:
+                        href = link["href"]
+                        # Skip site menu & non-paper internal links
+                        if any(x in href for x in ["/category/", "/page/", "/tag/", "#", "contact", "privacy", "about"]):
+                            continue
 
-                    if (
-                        clean_name
-                        and len(clean_name) > 2
-                        and clean_name not in papers
-                    ):
-                        if not any(
-                            x in post_url
-                            for x in ["/category/", "/page/", "/tag/", "#"]
+                        if clean_name and len(clean_name) > 1 and clean_name not in papers:
+                            papers[clean_name] = href
+
+                # Strategy 2: Direct Anchor Parsing (Fallback for all links on the page)
+                all_anchors = soup.find_all("a", href=True)
+                for a in all_anchors:
+                    href = a["href"]
+                    title_text = clean_paper_title(a.get_text(strip=True))
+
+                    if title_text and len(title_text) > 2 and title_text not in papers:
+                        if "dailyepaper.in/" in href and not any(
+                            x in href for x in ["/category/", "/page/", "/tag/", "#", "contact-us", "privacy-policy"]
                         ):
-                            papers[clean_name] = post_url
+                            papers[title_text] = href
 
-            if papers:
-                break
+                if len(papers) >= 5:  # Got a valid full list
+                    break
 
-        except Exception as e:
-            print(f"Scraper Error for {language} at {url}: {e}")
+            except Exception as e:
+                print(f"Scraper Error for {language} at {url}: {e}")
 
     return papers
 
 
 def get_drive_link(post_url: str) -> str | None:
-    """Extracts Google Drive link from paper post page."""
+    """Extracts Google Drive link from the paper's individual download post page."""
     try:
-        response = httpx.get(
-            post_url, headers=HEADERS, follow_redirects=True, timeout=20.0
-        )
-        if response.status_code != 200:
+        with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=25.0) as client:
+            response = client.get(post_url)
+            if response.status_code != 200:
+                return None
+
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            # 1. Direct Google Drive links
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"]
+                if ("drive.google.com" in href or "docs.google.com" in href) and "/forms/" not in href:
+                    return href
+
+            # 2. Regex fallback for inline scripts/redirect buttons
+            drive_pattern = r"https?://(?:drive|docs)\.google\.com/(?:file/d/|uc\?|drive/folders/)[^\s\"'<]+"
+            match = re.search(drive_pattern, response.text)
+            if match:
+                return match.group(0)
+
             return None
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"]
-            if (
-                "drive.google.com" in href or "docs.google.com" in href
-            ) and "/forms/" not in href:
-                return href
-
-        drive_pattern = r"https?://(?:drive|docs)\.google\.com/(?:file/d/|uc\?|drive/folders/)[^\s\"'<]+"
-        match = re.search(drive_pattern, response.text)
-        if match:
-            return match.group(0)
-
-        return None
 
     except Exception as e:
         print(f"Drive Extraction Error: {e}")
@@ -135,15 +145,11 @@ def get_drive_link(post_url: str) -> str | None:
 
 
 def extract_drive_id(url: str) -> str | None:
-    """Extracts File ID from Google Drive URLs."""
     match = re.search(r"(?:file/d/|id=|=)([a-zA-Z0-9_-]{25,})", url)
     return match.group(1) if match else None
 
 
-def download_pdf_from_drive(
-    drive_url: str, output_path: str = "temp_newspaper.pdf"
-) -> str | None:
-    """Downloads Google Drive PDF bypassing virus scan confirmation prompts."""
+def download_pdf_from_drive(drive_url: str, output_path: str = "temp_newspaper.pdf") -> str | None:
     file_id = extract_drive_id(drive_url)
     if not file_id:
         return None
@@ -152,13 +158,7 @@ def download_pdf_from_drive(
     download_url = "https://docs.google.com/uc?export=download"
 
     try:
-        response = session.get(
-            download_url,
-            params={"id": file_id},
-            headers=HEADERS,
-            stream=True,
-            timeout=30,
-        )
+        response = session.get(download_url, params={"id": file_id}, headers=HEADERS, stream=True, timeout=30)
 
         for key, value in response.cookies.items():
             if key.startswith("download_warning"):
