@@ -38,7 +38,8 @@ NAV_IGNORE = {
     "kannada", "malyalam", "bengali", "gujrati", "assam", "urdu", "about us",
     "dmca", "contact us", "privacy policy", "disclaimer", "all english",
     "all regional", "all tamil", "all telugu", "all hindi", "all epapers",
-    "menu", "categories", "recent posts", "download pdf", "download"
+    "menu", "categories", "recent posts", "download pdf", "download",
+    "read todays hindi", "hindi newspapers", "english newspapers"
 }
 
 
@@ -63,8 +64,16 @@ def clean_paper_title(raw_title: str) -> str:
     return cleaned.strip()
 
 
+def extract_title_from_url(url: str) -> str:
+    """Converts a post URL slug into a readable paper title."""
+    # Example: https://dailyepaper.in/dainik-jagran-epaper-free-download-2026/ -> dainik-jagran
+    slug = url.rstrip("/").split("/")[-1]
+    title = clean_paper_title(slug.replace("-", " "))
+    return title.title()
+
+
 def get_newspapers_by_language(language: str) -> dict:
-    """Scrapes newspaper names and links accurately from post cards and grid containers."""
+    """Scrapes newspaper titles directly from individual post links in the content body."""
     urls = CATEGORY_URLS.get(language.lower(), CATEGORY_URLS["hindi"])
     papers = {}
 
@@ -81,50 +90,45 @@ def get_newspapers_by_language(language: str) -> dict:
                 for nav in soup.select("header, footer, nav, sidebar, .widget, #masthead, #site-navigation, .menu"):
                     nav.decompose()
 
-                # Strategy 1: Search Article Titles and Post Headings (Standard WP Loop)
-                articles = soup.select("article, .post-item, .entry-header")
-                for article in articles:
-                    heading = article.select_one("h2, h3, .entry-title")
-                    link = article.find("a", href=True)
-                    if heading and link:
-                        clean_name = clean_paper_title(heading.get_text(strip=True))
-                        href = link["href"]
-                        if (
-                            clean_name
-                            and len(clean_name) > 2
-                            and clean_name.lower() not in NAV_IGNORE
-                            and clean_name not in papers
-                        ):
-                            if "dailyepaper.in/" in href and not any(
-                                x in href for x in ["/category/", "/page/", "/tag/", "#", "contact", "privacy", "about", "dmca"]
-                            ):
-                                papers[clean_name] = href
+                # Isolate main body
+                main_area = soup.select_one("main, #content, .site-main, .entry-content, article") or soup
 
-                # Strategy 2: Elementor Grid / Row Blocks (Handles two-column button cards)
-                if not papers:
-                    grid_blocks = soup.select(".elementor-element, tr, .wp-block-columns, div[class*='col-']")
-                    for block in grid_blocks:
-                        link = block.find("a", href=True)
-                        if not link:
-                            continue
+                # Extract all post links
+                all_links = main_area.find_all("a", href=True)
 
-                        # Get text inside block excluding the 'Download PDF' text
-                        block_text = block.get_text(" ", strip=True)
-                        clean_name = clean_paper_title(block_text)
-                        href = link["href"]
+                for link in all_links:
+                    href = link["href"]
 
-                        if (
-                            clean_name
-                            and len(clean_name) > 2
-                            and clean_name.lower() not in NAV_IGNORE
-                            and clean_name not in papers
-                        ):
-                            if "dailyepaper.in/" in href and not any(
-                                x in href for x in ["/category/", "/page/", "/tag/", "#", "contact", "privacy", "about", "dmca"]
-                            ):
-                                papers[clean_name] = href
+                    # Exclude non-article URLs
+                    if not ("dailyepaper.in/" in href) or any(
+                        x in href for x in ["/category/", "/page/", "/tag/", "#", "contact", "privacy", "about", "dmca"]
+                    ):
+                        continue
 
-                if papers:
+                    # Try getting title from anchor text, image alt, or title attribute
+                    raw_text = link.get_text(strip=True)
+                    if not raw_text or raw_text.lower() in ["download pdf", "download", "click here"]:
+                        img = link.find("img")
+                        if img and img.get("alt"):
+                            raw_text = img["alt"]
+                        elif link.get("title"):
+                            raw_text = link["title"]
+
+                    clean_name = clean_paper_title(raw_text)
+
+                    # Fallback to URL slug parsing if link text was missing/generic
+                    if not clean_name or clean_name.lower() in NAV_IGNORE:
+                        clean_name = extract_title_from_url(href)
+
+                    if (
+                        clean_name
+                        and len(clean_name) > 2
+                        and clean_name.lower() not in NAV_IGNORE
+                        and clean_name not in papers.values()
+                    ):
+                        papers[clean_name] = href
+
+                if len(papers) >= 3:
                     break
 
             except Exception as e:
