@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-twilio
 httpx
 beautifulsoup4
 gdown
+python-dotenv
