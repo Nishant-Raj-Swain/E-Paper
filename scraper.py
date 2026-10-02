@@ -1,5 +1,5 @@
-import re
 import os
+import re
 import httpx
 import requests
 from bs4 import BeautifulSoup
@@ -20,13 +20,16 @@ CATEGORY_URLS = {
 
 
 def clean_paper_title(raw_title: str) -> str:
+    """Strips download tags, dates, analysis suffixes, and boilerplate labels from titles."""
     patterns = [
-        r"(?i)\s*ePaper\s*Download\s*Daily\s*After\s*07:00\s*AM",
-        r"(?i)\s*Today\s*Download\s*After\s*07:00\s*AM",
-        r"(?i)\s*Free\s*Download\s*Daily\s*After\s*07:00\s*AM",
-        r"(?i)\s*Newspaper\s*Today\s*Download.*$",
-        r"(?i)\s*ePaper\s*Hindi\s*Download.*$",
+        r"(?i)\s*Analysis.*$",
+        r"(?i)\s*Newspaper.*$",
         r"(?i)\s*ePaper.*$",
+        r"(?i)\s*Today\s*Free\s*Download.*$",
+        r"(?i)\s*Free\s*Download.*$",
+        r"(?i)\s*Download.*$",
+        r"(?i)\s*PDF.*$",
+        r"\b202[0-9]\b",
     ]
     cleaned = raw_title
     for pattern in patterns:
@@ -37,7 +40,6 @@ def clean_paper_title(raw_title: str) -> str:
 def get_newspapers_by_language(language: str) -> dict:
     base_url = CATEGORY_URLS.get(language.lower(), CATEGORY_URLS["hindi"])
     
-    # List containing Page 1 and Page 2 URLs
     urls_to_scrape = [
         base_url,
         f"{base_url.rstrip('/')}/page/2/"
@@ -53,7 +55,6 @@ def get_newspapers_by_language(language: str) -> dict:
                     continue
 
                 soup = BeautifulSoup(response.text, "html.parser")
-                # Multi-selector fix for Odia and other varied post card formats
                 headings = soup.select("article h2, article h3, .entry-title, h2.post-title, h3.post-title")
 
                 for heading in headings:
