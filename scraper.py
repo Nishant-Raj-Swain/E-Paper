@@ -10,7 +10,6 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Explicit Landing Page Endpoints
 CATEGORY_URLS = {
     "english": [
         "https://dailyepaper.in/english-newspapers/",
@@ -32,6 +31,15 @@ CATEGORY_URLS = {
         "https://dailyepaper.in/bengali-newspapers/",
         "https://dailyepaper.in/category/bengali-epaper/",
     ],
+}
+
+# Ignore list to strip menu options, site categories, and header/footer items
+NAV_IGNORE = {
+    "home", "english", "hindi", "tamil", "telugu", "marathi", "punjabi", "odia",
+    "kannada", "malyalam", "bengali", "gujrati", "assam", "urdu", "about us",
+    "dmca", "contact us", "privacy policy", "disclaimer", "all english",
+    "all regional", "all tamil", "all telugu", "all hindi", "all epapers",
+    "menu", "categories", "recent posts"
 }
 
 
@@ -57,7 +65,7 @@ def clean_paper_title(raw_title: str) -> str:
 
 
 def get_newspapers_by_language(language: str) -> dict:
-    """Scrapes all newspapers from grid containers and post links."""
+    """Scrapes newspapers strictly from the main article content area."""
     urls = CATEGORY_URLS.get(language.lower(), CATEGORY_URLS["english"])
     papers = {}
 
@@ -70,43 +78,34 @@ def get_newspapers_by_language(language: str) -> dict:
 
                 soup = BeautifulSoup(response.text, "html.parser")
 
-                # Strategy 1: Grid Table/Card Rows (Handles English, Odia & Marathi layouts)
-                # Finds containers with paper name + download link
-                containers = soup.select(
-                    ".elementor-widget-container, .post-card, article, tr, .wp-block-columns"
-                )
+                # Step 1: Remove Header, Footer, and Sidebar elements to ignore site navigation
+                for nav in soup.select("header, footer, nav, sidebar, .widget, #masthead, #site-navigation, .menu"):
+                    nav.decompose()
 
-                for container in containers:
-                    links = container.find_all("a", href=True)
-                    if not links:
-                        continue
+                # Step 2: Target main content area
+                main_area = soup.select_one("main, #content, .site-main, .entry-content, article") or soup
 
-                    # Extract paper name from text or links inside container
-                    raw_text = container.get_text(" ", strip=True)
-                    clean_name = clean_paper_title(raw_text)
+                # Step 3: Parse grid cards or article titles inside the main area
+                links = main_area.find_all("a", href=True)
 
-                    for link in links:
-                        href = link["href"]
-                        # Skip site menu & non-paper internal links
-                        if any(x in href for x in ["/category/", "/page/", "/tag/", "#", "contact", "privacy", "about"]):
-                            continue
+                for a in links:
+                    href = a["href"]
+                    raw_title = a.get_text(strip=True)
+                    clean_name = clean_paper_title(raw_title)
 
-                        if clean_name and len(clean_name) > 1 and clean_name not in papers:
+                    # Filter conditions: length, navigation ignore list, URL exclusions
+                    if (
+                        clean_name
+                        and len(clean_name) > 2
+                        and clean_name.lower() not in NAV_IGNORE
+                        and clean_name not in papers
+                    ):
+                        if "dailyepaper.in/" in href and not any(
+                            x in href for x in ["/category/", "/page/", "/tag/", "#", "contact", "privacy", "about", "dmca"]
+                        ):
                             papers[clean_name] = href
 
-                # Strategy 2: Direct Anchor Parsing (Fallback for all links on the page)
-                all_anchors = soup.find_all("a", href=True)
-                for a in all_anchors:
-                    href = a["href"]
-                    title_text = clean_paper_title(a.get_text(strip=True))
-
-                    if title_text and len(title_text) > 2 and title_text not in papers:
-                        if "dailyepaper.in/" in href and not any(
-                            x in href for x in ["/category/", "/page/", "/tag/", "#", "contact-us", "privacy-policy"]
-                        ):
-                            papers[title_text] = href
-
-                if len(papers) >= 5:  # Got a valid full list
+                if len(papers) >= 3:
                     break
 
             except Exception as e:
@@ -116,7 +115,7 @@ def get_newspapers_by_language(language: str) -> dict:
 
 
 def get_drive_link(post_url: str) -> str | None:
-    """Extracts Google Drive link from the paper's individual download post page."""
+    """Extracts Google Drive link from the paper's individual post page."""
     try:
         with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=25.0) as client:
             response = client.get(post_url)
