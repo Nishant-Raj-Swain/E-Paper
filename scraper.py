@@ -1,8 +1,9 @@
 import os
 import re
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, parse_qs, urlparse
 
+import gdown
 import httpx
 import requests
 from bs4 import BeautifulSoup
@@ -16,13 +17,11 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
-# Language pages follow the pattern https://dailyepaper.in/<language>-newspapers/
 KNOWN_LANGUAGES = [
     "english", "hindi", "bengali", "kannada", "telugu", "tamil", "marathi",
     "odia", "punjabi", "malayalam", "gujarati", "assamese", "urdu",
 ]
 
-# Old category pages, kept only as a fallback if the new language page yields nothing
 CATEGORY_URLS = {
     "hindi": "https://dailyepaper.in/category/hindi-epaper/",
     "english": "https://dailyepaper.in/category/english-epaper/",
@@ -33,12 +32,11 @@ CATEGORY_URLS = {
 
 DATE_RE = re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\b")
 
-# Human-readable reason for the last failed download (handy to show in your UI)
 LAST_ERROR = ""
 
 
 # --------------------------------------------------------------------------
-# helpers
+# Helpers
 # --------------------------------------------------------------------------
 def _get_soup(url: str) -> BeautifulSoup | None:
     try:
@@ -70,10 +68,9 @@ def clean_paper_title(raw_title: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# step 1: languages
+# Languages
 # --------------------------------------------------------------------------
 def get_languages() -> dict:
-    """Returns {'odia': language_page_url, ...} from the 'Browse by Language' cards."""
     languages = {}
     soup = _get_soup(HOME_URL)
     if soup:
@@ -86,7 +83,7 @@ def get_languages() -> dict:
             if match:
                 languages[match.group(1).lower()] = urljoin(BASE_URL, a_tag["href"])
 
-    if not languages:  # fallback to URL pattern
+    if not languages:
         languages = {lang: f"{BASE_URL}/{lang}-newspapers/" for lang in KNOWN_LANGUAGES}
     return languages
 
@@ -97,10 +94,9 @@ def _language_url(language: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# step 2: papers of a language  ->  {paper name: paper page url}
+# Step 2: Papers of a Language
 # --------------------------------------------------------------------------
 def _legacy_category_papers(language: str) -> dict:
-    """Old behaviour: scrape post titles from /category/<language>-epaper/ pages."""
     base_url = CATEGORY_URLS.get(language.lower())
     if not base_url:
         return {}
@@ -131,7 +127,6 @@ def get_newspapers_by_language(language: str) -> dict:
 
             name = None
             card = a_tag.find_parent(["div", "li", "article"])
-            # only trust the card text if it belongs to this single button
             if card and len(card.find_all("a", string=re.compile("download pdf", re.I))) == 1:
                 texts = [
                     t.strip() for t in card.stripped_strings
@@ -139,7 +134,7 @@ def get_newspapers_by_language(language: str) -> dict:
                 ]
                 name = texts[-1] if texts else None
 
-            if not name:  # derive from URL slug: /sambad-epaper-free-download-2026/
+            if not name:
                 slug = a_tag["href"].rstrip("/").split("/")[-1]
                 name = re.split(r"-e-?paper", slug)[0].replace("-", " ").title()
 
@@ -153,7 +148,7 @@ def get_newspapers_by_language(language: str) -> dict:
 
 
 # --------------------------------------------------------------------------
-# step 3: dated editions of a paper  ->  [(date_str, link), ...] newest first
+# Step 3: Dated Editions
 # --------------------------------------------------------------------------
 def _parse_date(date_str: str) -> datetime:
     try:
@@ -163,7 +158,6 @@ def _parse_date(date_str: str) -> datetime:
 
 
 def get_editions(post_url: str) -> list:
-    """Reads rows like '02 Oct 2026: Download Now'. Holiday rows (no link) are skipped."""
     soup = _get_soup(post_url)
     if not soup:
         return []
@@ -188,30 +182,40 @@ def get_editions(post_url: str) -> list:
 
 
 # --------------------------------------------------------------------------
-# step 4: resolve the Google Drive link
+# Step 4: Resolve Google Drive Link
 # --------------------------------------------------------------------------
 def _resolve_to_drive(link: str) -> str | None:
-    """The 'Download Now' link may be a direct Drive link or go through a redirect."""
+    """Follows redirects and inspects web pages to find true Google Drive links."""
     if "drive.google.com" in link or "docs.google.com" in link:
         return link
+
     try:
+        # Request page and follow HTTP redirects
         response = httpx.get(link, headers=HEADERS, follow_redirects=True, timeout=20.0)
+
         for hop in list(response.history) + [response]:
-            if "drive.google.com" in str(hop.url) or "docs.google.com" in str(hop.url):
-                return str(hop.url)
+            target_url = str(hop.url)
+            if "drive.google.com" in target_url or "docs.google.com" in target_url:
+                return target_url
+
+        # Check content body for drive URLs
+        soup = BeautifulSoup(response.text, "html.parser")
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"]
+            if ("drive.google.com" in href or "docs.google.com" in href) and "/forms/" not in href:
+                return href
+
         match = re.search(r"https?://(?:drive|docs)\.google\.com/[^\s\"'<>]+", response.text)
         if match:
             return match.group(0)
+
     except Exception as e:
-        print(f"Redirect resolve error: {e}")
+        print(f"Redirect resolve error for {link}: {e}")
+
     return None
 
 
 def get_drive_link(post_url: str, date: str | None = None) -> str | None:
-    """
-    Returns the Drive link for a paper page.
-    date: e.g. '02 Oct 2026'. If omitted, the newest edition is used.
-    """
     editions = get_editions(post_url)
     if editions:
         link = editions[0][1]
@@ -221,14 +225,16 @@ def get_drive_link(post_url: str, date: str | None = None) -> str | None:
         if drive:
             return drive
 
-    # Fallback: old behaviour, first Drive link found anywhere on the page
+    # Fallback
     soup = _get_soup(post_url)
     if not soup:
         return None
+
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
         if ("drive.google.com" in href or "docs.google.com" in href) and "/forms/" not in href:
             return href
+
     match = re.search(
         r"https?://(?:drive|docs)\.google\.com/(?:file/d/|uc\?|drive/folders/)[^\s\"'<]+",
         soup.decode(),
@@ -237,27 +243,39 @@ def get_drive_link(post_url: str, date: str | None = None) -> str | None:
 
 
 def extract_drive_id(url: str) -> str | None:
-    """Extracts the file ID from a Google Drive link (folder links are not supported)."""
-    if "/folders/" in url:
+    """Extracts File ID from Google Drive URLs."""
+    if not url:
         return None
-    match = re.search(r"(?:/file/d/|/d/|[?&]id=)([a-zA-Z0-9_-]{20,})", url)
+
+    # Handle standard file/d/<ID> links
+    match = re.search(r"/file/d/([a-zA-Z0-9_-]{20,})", url)
+    if match:
+        return match.group(1)
+
+    # Handle id=<ID> query parameters
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    if "id" in query_params:
+        return query_params["id"][0]
+
+    # General regex fallback
+    match = re.search(r"(?:/d/|[?&]id=|=)([a-zA-Z0-9_-]{25,})", url)
     return match.group(1) if match else None
 
 
 # --------------------------------------------------------------------------
-# step 5: download
+# Step 5: Download Logic
 # --------------------------------------------------------------------------
 def _save_if_pdf(response: requests.Response, output_path: str) -> bool:
-    """Streams the response to disk only if it really is a PDF (not an HTML error page)."""
     global LAST_ERROR
     first = next(response.iter_content(chunk_size=32768), b"")
 
     if not first.startswith(b"%PDF"):
         text = first.decode("utf-8", errors="ignore")
         if "Too many users" in text or "quota" in text.lower():
-            LAST_ERROR = "Google Drive download quota exceeded for this file. Try later or another edition."
+            LAST_ERROR = "Google Drive download quota exceeded for this file."
         else:
-            LAST_ERROR = "Drive returned a web page instead of the PDF."
+            LAST_ERROR = "Drive returned an HTML page instead of a PDF."
         return False
 
     with open(output_path, "wb") as f:
@@ -265,76 +283,96 @@ def _save_if_pdf(response: requests.Response, output_path: str) -> bool:
         for chunk in response.iter_content(chunk_size=32768):
             if chunk:
                 f.write(chunk)
-    return os.path.getsize(output_path) > 10000
+
+    return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
 
 
 def download_pdf_from_drive(drive_url: str, output_path: str = "temp_newspaper.pdf") -> str | None:
-    """Tries the current Drive endpoint first, then the legacy cookie-token flow."""
+    """Downloads PDF using direct stream requests with fallback to gdown."""
     global LAST_ERROR
     LAST_ERROR = ""
 
     file_id = extract_drive_id(drive_url)
-    if not file_id:
-        LAST_ERROR = "Could not find a Drive file id in the link."
-        return None
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    # Strategy 1: Direct requests download (Fastest)
+    if file_id:
+        session = requests.Session()
+        session.headers.update(HEADERS)
 
+        try:
+            url = "https://drive.usercontent.google.com/download"
+            response = session.get(
+                url, params={"id": file_id, "export": "download", "confirm": "t"}, stream=True, timeout=30
+            )
+            if response.status_code == 200 and _save_if_pdf(response, output_path):
+                return output_path
+
+            # Legacy uc?export endpoint
+            legacy_url = "https://docs.google.com/uc?export=download"
+            response = session.get(legacy_url, params={"id": file_id}, stream=True, timeout=30)
+            for key, value in response.cookies.items():
+                if key.startswith("download_warning"):
+                    response = session.get(
+                        legacy_url, params={"id": file_id, "confirm": value}, stream=True, timeout=30
+                    )
+                    break
+
+            if response.status_code == 200 and _save_if_pdf(response, output_path):
+                return output_path
+
+        except Exception as e:
+            print(f"Direct stream download error: {e}")
+
+    # Strategy 2: gdown fallback (Handles quota warnings, direct links, and complex URLs)
     try:
-        # Strategy 1: current direct-download endpoint (confirm=t skips the virus-scan page)
-        response = session.get(
-            "https://drive.usercontent.google.com/download",
-            params={"id": file_id, "export": "download", "confirm": "t"},
-            stream=True,
-            timeout=30,
-        )
-        if response.status_code == 200 and _save_if_pdf(response, output_path):
-            return output_path
-
-        # Strategy 2: legacy endpoint with the download_warning cookie token
-        url = "https://docs.google.com/uc?export=download"
-        response = session.get(url, params={"id": file_id}, stream=True, timeout=30)
-        for key, value in response.cookies.items():
-            if key.startswith("download_warning"):
-                response = session.get(
-                    url, params={"id": file_id, "confirm": value}, stream=True, timeout=30
-                )
-                break
-        if response.status_code == 200 and _save_if_pdf(response, output_path):
-            return output_path
+        downloaded = gdown.download(drive_url, output_path, quiet=True, fuzzy=True)
+        if downloaded and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+            with open(output_path, "rb") as f:
+                header = f.read(4)
+                if header.startswith(b"%PDF"):
+                    return output_path
 
     except Exception as e:
-        LAST_ERROR = f"Download error: {e}"
+        LAST_ERROR = f"gdown download error: {e}"
         print(LAST_ERROR)
 
-    if os.path.exists(output_path) and os.path.getsize(output_path) <= 10000:
+    if os.path.exists(output_path):
         os.remove(output_path)
+
+    if not LAST_ERROR:
+        LAST_ERROR = "Failed to download PDF from Drive."
+
     return None
 
 
-def download_latest_available(post_url: str, output_path: str = "temp_newspaper.pdf",
-                              max_editions: int = 3) -> tuple[str, str] | None:
-    """
-    Tries the newest edition first and falls back to older ones if Drive blocks the file.
-    Returns (path, date) on success, None otherwise.
-    """
-    for date, link in get_editions(post_url)[:max_editions]:
-        drive_url = _resolve_to_drive(link)
-        if not drive_url:
-            continue
+def download_latest_available(
+    post_url: str, output_path: str = "temp_newspaper.pdf", max_editions: int = 3
+) -> tuple[str, str] | None:
+    """Tries the newest edition first and falls back to older ones if download fails."""
+    editions = get_editions(post_url)
+
+    if editions:
+        for date, link in editions[:max_editions]:
+            drive_url = _resolve_to_drive(link)
+            if not drive_url:
+                continue
+            path = download_pdf_from_drive(drive_url, output_path)
+            if path:
+                return path, date
+            print(f"{date}: {LAST_ERROR or 'Download failed'}")
+
+    # Fallback to direct page resolution
+    drive_url = get_drive_link(post_url)
+    if drive_url:
         path = download_pdf_from_drive(drive_url, output_path)
         if path:
-            return path, date
-        print(f"{date}: {LAST_ERROR or 'download failed'}")
+            return path, "Today"
+
     return None
 
 
-# --------------------------------------------------------------------------
-# quick manual test:  python scrapper.py
-# --------------------------------------------------------------------------
 if __name__ == "__main__":
-    lang = "odia"
+    lang = "english"
     papers = get_newspapers_by_language(lang)
     print(f"{lang}: {list(papers)}")
     if papers:
