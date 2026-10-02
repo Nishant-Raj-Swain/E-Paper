@@ -16,8 +16,7 @@ from fastapi.responses import Response
 
 # Scraper module import
 from scraper import (
-    download_pdf_from_drive,
-    get_drive_link,
+    download_newspaper_pipeline,
     get_newspapers_by_language,
 )
 
@@ -48,11 +47,19 @@ locks = {}
 user_states = {}
 
 LANG_MAP = {
-    "1": "hindi",
-    "2": "english",
-    "3": "odia",
-    "4": "marathi",
-    "5": "bengali",
+    "1": "english",
+    "2": "hindi",
+    "3": "bengali",
+    "4": "kannada",
+    "5": "telugu",
+    "6": "tamil",
+    "7": "marathi",
+    "8": "odia",
+    "9": "punjabi",
+    "10": "malayalam",
+    "11": "gujarati",
+    "12": "assamese",
+    "13": "urdu",
 }
 
 
@@ -226,11 +233,19 @@ class WhatsApp:
         menu_msg = (
             "📰 *Welcome to Daily ePaper Bot!*\n\n"
             "Please select a language by replying with a number:\n"
-            "1️⃣ Hindi Epaper\n"
-            "2️⃣ English Epaper\n"
-            "3️⃣ Odia Epaper\n"
-            "4️⃣ Marathi Epaper\n"
-            "5️⃣ Bengali Epaper\n\n"
+            "1️⃣ English Epaper\n"
+            "2️⃣ Hindi Epaper\n"
+            "3️⃣ Bengali Epaper\n"
+            "4️⃣ Kannada Epaper\n"
+            "5️⃣ Telugu Epaper\n"
+            "6️⃣ Tamil Epaper\n"
+            "7️⃣ Marathi Epaper\n"
+            "8️⃣ Odia Epaper\n"
+            "9️⃣ Punjabi Epaper\n"
+            "🔟 Malayalam Epaper\n"
+            "1️⃣1️⃣ Gujarati Epaper\n"
+            "1️⃣2️⃣ Assamese Epaper\n"
+            "1️⃣3️⃣ Urdu Epaper\n\n"
             "_Type /menu anytime to restart._"
         )
         await self.send_text(phone, menu_msg)
@@ -280,7 +295,7 @@ async def handle_text(phone: str, text: str):
     if mode == "select_lang":
         if text not in LANG_MAP:
             await wa.send_text(
-                phone, "⚠️ Please reply with a valid choice between *1 and 5*."
+                phone, "⚠️ Please reply with a valid choice between *1 and 13*."
             )
             return
 
@@ -289,7 +304,6 @@ async def handle_text(phone: str, text: str):
             phone, f"⏳ Fetching *{selected_lang.upper()}* newspapers..."
         )
 
-        # Runs sync scraper function in an async executor thread
         loop = asyncio.get_running_loop()
         papers = await loop.run_in_executor(
             None, get_newspapers_by_language, selected_lang
@@ -303,7 +317,6 @@ async def handle_text(phone: str, text: str):
             user_states[phone] = {}
             return
 
-        # Store paper dictionary mapping for user session
         paper_names = list(papers.keys())
         user_states[phone] = {
             "mode": "select_paper",
@@ -344,53 +357,55 @@ async def handle_text(phone: str, text: str):
         post_url = papers[chosen_paper_name]
 
         await wa.send_text(
-            phone, f"⏳ Extracting PDF link for *{chosen_paper_name}*..."
+            phone, f"⏳ Extracting PDF link & downloading *{chosen_paper_name}*..."
         )
 
         loop = asyncio.get_running_loop()
-        drive_url = await loop.run_in_executor(None, get_drive_link, post_url)
+        temp_filename = f"{chosen_paper_name}.pdf"
 
-        if not drive_url:
+        result = await loop.run_in_executor(
+            None, download_newspaper_pipeline, post_url, temp_filename
+        )
+
+        status = result.get("status")
+
+        if status == "file":
+            pdf_path = result.get("path")
+            edition_date = result.get("date", "Today")
+
+            if pdf_path and os.path.exists(pdf_path):
+                media_id = await wa.upload_media(pdf_path)
+
+                if media_id:
+                    await wa.send_document(
+                        phone, media_id, f"{chosen_paper_name}.pdf"
+                    )
+                    await wa.send_text(
+                        phone,
+                        f"🎉 Here is your newspaper (*{chosen_paper_name} - {edition_date}*)!\nType `/menu` to download another.",
+                    )
+                else:
+                    await wa.send_text(
+                        phone,
+                        "❌ Failed to upload PDF to WhatsApp. Please try again later.",
+                    )
+
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+
+        elif status == "link":
+            drive_url = result.get("drive_url")
             await wa.send_text(
                 phone,
-                "❌ Couldn't extract today's PDF link. Send `/menu` to try another paper.",
+                f"⚠️ Direct PDF download is currently restricted or quota exceeded on Google Drive.\n\n"
+                f"🔗 *Download or read {chosen_paper_name} directly here:*\n{drive_url}\n\n"
+                f"_Type `/menu` to try another paper._",
             )
-            user_states[phone] = {}
-            return
 
-        await wa.send_text(
-            phone,
-            f"⬇️ Downloading *{chosen_paper_name}* PDF file... Please wait.",
-        )
-
-        # Download PDF file locally
-        temp_filename = f"{chosen_paper_name}.pdf"
-        pdf_path = await loop.run_in_executor(
-            None, download_pdf_from_drive, drive_url, temp_filename
-        )
-
-        if pdf_path and os.path.exists(pdf_path):
-            # Upload downloaded PDF to WhatsApp Media API
-            media_id = await wa.upload_media(pdf_path)
-
-            if media_id:
-                # Send PDF document directly to user
-                await wa.send_document(phone, media_id, f"{chosen_paper_name}.pdf")
-                await wa.send_text(
-                    phone, "🎉 Here is your newspaper! Type `/menu` to download another."
-                )
-            else:
-                await wa.send_text(
-                    phone, "❌ Failed to upload PDF to WhatsApp. Please try again later."
-                )
-
-            # Cleanup local temp PDF file
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
         else:
             await wa.send_text(
                 phone,
-                "❌ Failed to download PDF from Drive. Send `/menu` to try another paper.",
+                "❌ Couldn't retrieve PDF or link for this newspaper. Send `/menu` to try another paper.",
             )
 
         user_states[phone] = {}
