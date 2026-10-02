@@ -10,27 +10,13 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-CATEGORY_URLS = {
-    "english": [
-        "https://dailyepaper.in/english-newspapers/",
-        "https://dailyepaper.in/category/english-epaper/",
-    ],
-    "hindi": [
-        "https://dailyepaper.in/hindi-newspapers/",
-        "https://dailyepaper.in/category/hindi-epaper/",
-    ],
-    "odia": [
-        "https://dailyepaper.in/odia-newspapers/",
-        "https://dailyepaper.in/category/odia-epaper/",
-    ],
-    "marathi": [
-        "https://dailyepaper.in/marathi-newspapers/",
-        "https://dailyepaper.in/category/marathi-epaper/",
-    ],
-    "bengali": [
-        "https://dailyepaper.in/bengali-newspapers/",
-        "https://dailyepaper.in/category/bengali-epaper/",
-    ],
+# Base WordPress category endpoint mappings
+CATEGORY_BASES = {
+    "hindi": "https://dailyepaper.in/category/hindi-epaper/",
+    "english": "https://dailyepaper.in/category/english-epaper/",
+    "bengali": "https://dailyepaper.in/category/bengali-epaper/",
+    "odia": "https://dailyepaper.in/category/odia-epaper/",
+    "marathi": "https://dailyepaper.in/category/marathi-epaper/",
 }
 
 NAV_IGNORE = {
@@ -38,15 +24,13 @@ NAV_IGNORE = {
     "kannada", "malyalam", "bengali", "gujrati", "assam", "urdu", "about us",
     "dmca", "contact us", "privacy policy", "disclaimer", "all english",
     "all regional", "all tamil", "all telugu", "all hindi", "all epapers",
-    "menu", "categories", "recent posts", "download pdf", "download",
-    "read todays hindi", "hindi newspapers", "english newspapers"
+    "menu", "categories", "recent posts"
 }
 
 
 def clean_paper_title(raw_title: str) -> str:
-    """Removes boilerplate button labels, years, and download suffixes."""
+    """Strips boilerplate labels, years, and download tags from post titles."""
     patterns = [
-        r"(?i)\s*Download\s*PDF",
         r"(?i)\s*ePaper\s*Download\s*Daily\s*After\s*07:00\s*AM",
         r"(?i)\s*Today\s*Download\s*After\s*07:00\s*AM",
         r"(?i)\s*Free\s*Download\s*Daily\s*After\s*07:00\s*AM",
@@ -56,7 +40,7 @@ def clean_paper_title(raw_title: str) -> str:
         r"(?i)\s*Free\s*Download.*$",
         r"(?i)\s*ePaper.*$",
         r"(?i)\s*PDF\s*Download.*$",
-        r"\b202[0-9]\b",
+        r"\b202[0-9]\b",  # Removes dynamic year strings like 2025, 2026
     ]
     cleaned = raw_title
     for pattern in patterns:
@@ -64,81 +48,62 @@ def clean_paper_title(raw_title: str) -> str:
     return cleaned.strip()
 
 
-def extract_title_from_url(url: str) -> str:
-    """Converts a post URL slug into a readable paper title."""
-    # Example: https://dailyepaper.in/dainik-jagran-epaper-free-download-2026/ -> dainik-jagran
-    slug = url.rstrip("/").split("/")[-1]
-    title = clean_paper_title(slug.replace("-", " "))
-    return title.title()
-
-
 def get_newspapers_by_language(language: str) -> dict:
-    """Scrapes newspaper titles directly from individual post links in the content body."""
-    urls = CATEGORY_URLS.get(language.lower(), CATEGORY_URLS["hindi"])
+    """Fetches newspapers across Page 1 and Page 2 for the requested category."""
+    base_url = CATEGORY_BASES.get(language.lower(), CATEGORY_BASES["hindi"])
+    
+    # Generate Page 1 and Page 2 URLs
+    urls_to_scrape = [
+        base_url,
+        f"{base_url.rstrip('/')}/page/2/"
+    ]
+    
     papers = {}
 
     with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=25.0) as client:
-        for url in urls:
+        for page_url in urls_to_scrape:
             try:
-                response = client.get(url)
+                response = client.get(page_url)
                 if response.status_code != 200:
                     continue
 
                 soup = BeautifulSoup(response.text, "html.parser")
 
-                # Remove header, footer, and sidebar navigation
+                # Deconstruct navigation menus to isolate content posts
                 for nav in soup.select("header, footer, nav, sidebar, .widget, #masthead, #site-navigation, .menu"):
                     nav.decompose()
 
-                # Isolate main body
-                main_area = soup.select_one("main, #content, .site-main, .entry-content, article") or soup
+                # Extract WordPress post title links
+                headings = soup.select(
+                    "article h2, article h3, .entry-title, h2.post-title, h3.post-title, .post-archive h2"
+                )
 
-                # Extract all post links
-                all_links = main_area.find_all("a", href=True)
+                for heading in headings:
+                    raw_title = heading.get_text(strip=True)
+                    a_tag = heading if heading.name == "a" else heading.find("a")
 
-                for link in all_links:
-                    href = link["href"]
+                    if a_tag and "href" in a_tag.attrs:
+                        post_url = a_tag["href"]
+                        clean_name = clean_paper_title(raw_title)
 
-                    # Exclude non-article URLs
-                    if not ("dailyepaper.in/" in href) or any(
-                        x in href for x in ["/category/", "/page/", "/tag/", "#", "contact", "privacy", "about", "dmca"]
-                    ):
-                        continue
-
-                    # Try getting title from anchor text, image alt, or title attribute
-                    raw_text = link.get_text(strip=True)
-                    if not raw_text or raw_text.lower() in ["download pdf", "download", "click here"]:
-                        img = link.find("img")
-                        if img and img.get("alt"):
-                            raw_text = img["alt"]
-                        elif link.get("title"):
-                            raw_text = link["title"]
-
-                    clean_name = clean_paper_title(raw_text)
-
-                    # Fallback to URL slug parsing if link text was missing/generic
-                    if not clean_name or clean_name.lower() in NAV_IGNORE:
-                        clean_name = extract_title_from_url(href)
-
-                    if (
-                        clean_name
-                        and len(clean_name) > 2
-                        and clean_name.lower() not in NAV_IGNORE
-                        and clean_name not in papers.values()
-                    ):
-                        papers[clean_name] = href
-
-                if len(papers) >= 3:
-                    break
+                        # Filter out navigation, pagination, and invalid links
+                        if (
+                            clean_name
+                            and len(clean_name) > 2
+                            and clean_name.lower() not in NAV_IGNORE
+                            and clean_name not in papers
+                        ):
+                            if not any(x in post_url for x in ["/category/", "/page/", "/tag/", "#"]):
+                                papers[clean_name] = post_url
 
             except Exception as e:
-                print(f"Scraper Error for {language} at {url}: {e}")
+                print(f"Scraper Error for {language} on {page_url}: {e}")
 
     return papers
 
 
 def get_drive_link(post_url: str) -> str | None:
-    """Extracts Google Drive link from the paper's individual post page."""
+    """Extracts Google Drive attachment link from paper post page."""
     try:
         with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=25.0) as client:
             response = client.get(post_url)
@@ -147,13 +112,13 @@ def get_drive_link(post_url: str) -> str | None:
 
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # 1. Direct Google Drive links
+            # Search anchor tags for Google Drive links
             for a_tag in soup.find_all("a", href=True):
                 href = a_tag["href"]
                 if ("drive.google.com" in href or "docs.google.com" in href) and "/forms/" not in href:
                     return href
 
-            # 2. Regex fallback
+            # Regex fallback
             drive_pattern = r"https?://(?:drive|docs)\.google\.com/(?:file/d/|uc\?|drive/folders/)[^\s\"'<]+"
             match = re.search(drive_pattern, response.text)
             if match:
