@@ -4,3 +4,5 @@ httpx
 beautifulsoup4
 gdown
 python-dotenv
+cloudscraper
+requests
