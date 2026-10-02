@@ -1,27 +1,27 @@
 import os
 import re
-import httpx
+import cloudscraper
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+# Initialize cloudscraper session to bypass Cloudflare protection
+scraper = cloudscraper.create_scraper(
+    browser={
+        "browser": "chrome",
+        "platform": "windows",
+        "desktop": True,
+    }
+)
 
-# Multi-path fallbacks for each language to ensure pages are reached successfully
 CATEGORY_URLS = {
     "hindi": [
         "https://dailyepaper.in/category/hindi-epaper/",
         "https://dailyepaper.in/category/hindi-epaper/page/2/",
-        "https://dailyepaper.in/category/hindi-newspaper/",
         "https://dailyepaper.in/hindi-newspapers/",
     ],
     "english": [
         "https://dailyepaper.in/category/english-epaper/",
         "https://dailyepaper.in/category/english-epaper/page/2/",
-        "https://dailyepaper.in/category/english-newspaper/",
         "https://dailyepaper.in/english-newspapers/",
     ],
     "bengali": [
@@ -63,7 +63,7 @@ def clean_paper_title(raw_title: str) -> str:
         r"(?i)\s*Free\s*Download.*$",
         r"(?i)\s*ePaper.*$",
         r"(?i)\s*PDF\s*Download.*$",
-        r"\b202[0-9]\b",  # Cleanly matches dynamic years like 2025, 2026
+        r"\b202[0-9]\b",
     ]
     cleaned = raw_title
     for pattern in patterns:
@@ -72,47 +72,49 @@ def clean_paper_title(raw_title: str) -> str:
 
 
 def get_newspapers_by_language(language: str) -> dict:
-    """Scrapes newspapers strictly from category archives across pages 1 and 2."""
+    """Scrapes newspapers using CloudScraper to bypass Cloudflare protection."""
     urls = CATEGORY_URLS.get(language.lower(), CATEGORY_URLS["hindi"])
     papers = {}
 
-    with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=25.0) as client:
-        for url in urls:
-            try:
-                response = client.get(url)
-                if response.status_code != 200:
-                    continue
+    for url in urls:
+        try:
+            response = scraper.get(url, timeout=20)
+            if response.status_code != 200:
+                print(f"Failed to fetch {url} - Status Code: {response.status_code}")
+                continue
 
-                soup = BeautifulSoup(response.text, "html.parser")
+            soup = BeautifulSoup(response.text, "html.parser")
 
-                # Deconstruct header, footer, and sidebar navigation
-                for nav in soup.select("header, footer, nav, sidebar, .widget, #masthead, #site-navigation, .menu"):
-                    nav.decompose()
+            # Remove navigation, headers, footers, and sidebars
+            for nav in soup.select("header, footer, nav, sidebar, .widget, #masthead, #site-navigation, .menu"):
+                nav.decompose()
 
-                # Search article post titles
-                headings = soup.select(
-                    "article h2, article h3, .entry-title, h2.post-title, h3.post-title, .post-archive h2"
-                )
+            # Target post headings & titles
+            headings = soup.select(
+                "article h2, article h3, .entry-title, h2.post-title, h3.post-title, .post-archive h2, article a"
+            )
 
-                for heading in headings:
-                    raw_title = heading.get_text(strip=True)
-                    a_tag = heading if heading.name == "a" else heading.find("a")
+            for heading in headings:
+                raw_title = heading.get_text(strip=True)
+                a_tag = heading if heading.name == "a" else heading.find("a")
 
-                    if a_tag and "href" in a_tag.attrs:
-                        post_url = a_tag["href"]
-                        clean_name = clean_paper_title(raw_title)
+                if a_tag and "href" in a_tag.attrs:
+                    post_url = a_tag["href"]
+                    clean_name = clean_paper_title(raw_title)
 
-                        if (
-                            clean_name
-                            and len(clean_name) > 2
-                            and clean_name.lower() not in NAV_IGNORE
-                            and clean_name not in papers
+                    if (
+                        clean_name
+                        and len(clean_name) > 2
+                        and clean_name.lower() not in NAV_IGNORE
+                        and clean_name not in papers
+                    ):
+                        if "dailyepaper.in/" in post_url and not any(
+                            x in post_url for x in ["/category/", "/page/", "/tag/", "#", "contact", "privacy", "about", "dmca"]
                         ):
-                            if not any(x in post_url for x in ["/category/", "/page/", "/tag/", "#"]):
-                                papers[clean_name] = post_url
+                            papers[clean_name] = post_url
 
-            except Exception as e:
-                print(f"Scraper Error for {language} at {url}: {e}")
+        except Exception as e:
+            print(f"Scraper Error for {language} at {url}: {e}")
 
     return papers
 
@@ -120,26 +122,25 @@ def get_newspapers_by_language(language: str) -> dict:
 def get_drive_link(post_url: str) -> str | None:
     """Extracts Google Drive link from the paper's individual post page."""
     try:
-        with httpx.Client(headers=HEADERS, follow_redirects=True, timeout=25.0) as client:
-            response = client.get(post_url)
-            if response.status_code != 200:
-                return None
-
-            soup = BeautifulSoup(response.text, "html.parser")
-
-            # Direct Google Drive link search
-            for a_tag in soup.find_all("a", href=True):
-                href = a_tag["href"]
-                if ("drive.google.com" in href or "docs.google.com" in href) and "/forms/" not in href:
-                    return href
-
-            # Regex pattern matching fallback
-            drive_pattern = r"https?://(?:drive|docs)\.google\.com/(?:file/d/|uc\?|drive/folders/)[^\s\"'<]+"
-            match = re.search(drive_pattern, response.text)
-            if match:
-                return match.group(0)
-
+        response = scraper.get(post_url, timeout=20)
+        if response.status_code != 200:
             return None
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Search anchor tags for Google Drive links
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"]
+            if ("drive.google.com" in href or "docs.google.com" in href) and "/forms/" not in href:
+                return href
+
+        # Regex fallback
+        drive_pattern = r"https?://(?:drive|docs)\.google\.com/(?:file/d/|uc\?|drive/folders/)[^\s\"'<]+"
+        match = re.search(drive_pattern, response.text)
+        if match:
+            return match.group(0)
+
+        return None
 
     except Exception as e:
         print(f"Drive Extraction Error: {e}")
@@ -160,14 +161,13 @@ def download_pdf_from_drive(drive_url: str, output_path: str = "temp_newspaper.p
     download_url = "https://docs.google.com/uc?export=download"
 
     try:
-        response = session.get(download_url, params={"id": file_id}, headers=HEADERS, stream=True, timeout=30)
+        response = session.get(download_url, params={"id": file_id}, stream=True, timeout=30)
 
         for key, value in response.cookies.items():
             if key.startswith("download_warning"):
                 response = session.get(
                     download_url,
                     params={"id": file_id, "confirm": value},
-                    headers=HEADERS,
                     stream=True,
                     timeout=30,
                 )
