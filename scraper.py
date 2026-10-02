@@ -23,11 +23,19 @@ KNOWN_LANGUAGES = [
 ]
 
 CATEGORY_URLS = {
-    "hindi": "https://dailyepaper.in/category/hindi-epaper/",
     "english": "https://dailyepaper.in/category/english-epaper/",
-    "odia": "https://dailyepaper.in/category/odia-epaper/",
-    "marathi": "https://dailyepaper.in/category/marathi-epaper/",
+    "hindi": "https://dailyepaper.in/category/hindi-epaper/",
     "bengali": "https://dailyepaper.in/category/bengali-epaper/",
+    "kannada": "https://dailyepaper.in/category/kannada-epaper/",
+    "telugu": "https://dailyepaper.in/category/telugu-epaper/",
+    "tamil": "https://dailyepaper.in/category/tamil-epaper/",
+    "marathi": "https://dailyepaper.in/category/marathi-epaper/",
+    "odia": "https://dailyepaper.in/category/odia-epaper/",
+    "punjabi": "https://dailyepaper.in/category/punjabi-epaper/",
+    "malayalam": "https://dailyepaper.in/category/malayalam-epaper/",
+    "gujarati": "https://dailyepaper.in/category/gujarati-epaper/",
+    "assamese": "https://dailyepaper.in/category/assamese-epaper/",
+    "urdu": "https://dailyepaper.in/category/urdu-epaper/",
 }
 
 DATE_RE = re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\b")
@@ -349,26 +357,10 @@ def download_pdf_from_drive(drive_url: str, output_path: str = "temp_newspaper.p
 
 
 def download_newspaper_pipeline(post_url: str, output_path: str = "temp_newspaper.pdf") -> dict:
-    """
-    Main function for your Telegram Bot handler.
-    Returns:
-      {
-        "status": "file",
-        "path": "temp_newspaper.pdf",
-        "date": "02 Oct 2026"
-      }
-      OR
-      {
-        "status": "link",
-        "drive_url": "https://drive.google.com/...",
-        "date": "02 Oct 2026"
-      }
-    """
     editions = get_editions(post_url)
     last_known_drive_url = None
 
     if editions:
-        # Loop through the last 3 editions if direct download fails due to quota limits
         for date, link in editions[:3]:
             drive_url = _resolve_to_drive(link)
             if not drive_url:
@@ -380,7 +372,6 @@ def download_newspaper_pipeline(post_url: str, output_path: str = "temp_newspape
             if path:
                 return {"status": "file", "path": path, "date": date}
 
-    # Direct fallback search
     drive_url = get_drive_link(post_url)
     if drive_url:
         last_known_drive_url = drive_url
@@ -388,7 +379,6 @@ def download_newspaper_pipeline(post_url: str, output_path: str = "temp_newspape
         if path:
             return {"status": "file", "path": path, "date": "Today"}
 
-    # If PDF file download fails completely, return the Google Drive link as fallback
     if last_known_drive_url:
         return {"status": "link", "drive_url": last_known_drive_url, "date": "Today"}
 
